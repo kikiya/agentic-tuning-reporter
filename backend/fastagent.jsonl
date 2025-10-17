@@ -1,0 +1,2 @@
+{"level":"ERROR","timestamp":"2025-10-03T13:22:19.929672","namespace":"mcp_agent.mcp.mcp_agent_client_session","message":"send_request failed: Connection closed"}
+{"level":"ERROR","timestamp":"2025-10-03T13:22:19.931614","namespace":"mcp_agent.mcp.mcp_connection_manager","message":"reporter: Lifecycle task encountered an error: unhandled errors in a TaskGroup (1 sub-exception)","data":{"exc_info":true,"data":{"progress_action":"Error","server_name":"reporter"}}}

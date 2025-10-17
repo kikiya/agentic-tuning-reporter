@@ -1,0 +1,74 @@
+# macOS
+.DS_Store
+
+# General
+*.log
+logs/
+*.tmp
+.tmp/
+
+# Env files (never commit secrets)
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Certificates/keys (avoid committing secrets)
+*.crt
+*.key
+*.pem
+certs/
+**/certs/
+
+# Editor/OS
+.vscode/
+.idea/
+*.swp
+
+# Python (backend)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.eggs/
+.eggs-info/
+*.egg-info/
+dist/
+build/
+backend/venv/
+backend/.venv/
+venv/
+.venv/
+
+# Node / React / Vite (frontend)
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+frontend/.cache/
+frontend/.turbo/
+.pnpm-store/
+.npm/
+yarn.lock
+pnpm-lock.yaml
+package-lock.json
+
+# Testing/coverage
+coverage/
+frontend/coverage/
+
+# Local runtime
+*.sqlite
+*.sqlite3
+
+# FastAgent
+fastagent.secrets.yaml
+fastagent.jsonl
+
