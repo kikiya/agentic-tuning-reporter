@@ -24,7 +24,8 @@ import uuid
 
 from models_sync import (
     User, Report, Finding, RecommendedAction, Comment,
-    ReportStatusHistory, FindingStatusHistory, ActionStatusHistory
+    ReportStatusHistory, FindingStatusHistory, ActionStatusHistory,
+    UserAccess
 )
 from schemas import (
     ReportCreate, ReportUpdate, FindingCreate, FindingUpdate,
@@ -109,6 +110,47 @@ def get_reports(db: Session, skip: int = 0, limit: int = 100) -> List[Report]:
     """
     return db.query(Report).order_by(desc(Report.created_at)).offset(skip).limit(limit).all()
 
+
+def get_reports_for_user(
+    db: Session,
+    user_id: str,
+    skip: int = 0,
+    limit: int = 100,
+    include_admin: bool = True,
+) -> List[Report]:
+    """
+    Retrieve reports accessible to a specific user based on customer access mappings.
+
+    Args:
+        db: Database session
+        user_id: User identifier used in user_access table
+        skip: Number of records to skip
+        limit: Maximum number of records to return
+        include_admin: If True, users with role 'admin' get all reports
+
+    Returns:
+        List of accessible Report objects ordered by creation date
+    """
+
+    query = db.query(Report).order_by(desc(Report.created_at))
+
+    # If we should honor admin role and user is admin, return all reports
+    if include_admin:
+        user = db.query(User).filter(User.id == user_id).first()
+        if user and user.role == "admin":
+            return query.offset(skip).limit(limit).all()
+
+    # Build subquery of accessible customer IDs
+    accessible_customers_subquery = (
+        select(UserAccess.customer_id)
+        .where(UserAccess.user_id == user_id)
+    )
+
+    # Limit to reports from accessible customers
+    query = query.filter(Report.customer_id.in_(accessible_customers_subquery))
+
+    return query.offset(skip).limit(limit).all()
+
 def get_report_by_id(db: Session, report_id: uuid.UUID) -> Optional[Report]:
     """
     Retrieve a specific report by its UUID with related data loaded.
@@ -138,6 +180,7 @@ def get_reports_by_cluster(db: Session, cluster_id: str) -> List[Report]:
 def create_report(db: Session, report_data: ReportCreate, created_by: str) -> Report:
     """
     Create a new tuning report with initial audit trail.
+    Automatically generates vector embedding for similarity search.
     
     Args:
         db: Database session
@@ -151,12 +194,26 @@ def create_report(db: Session, report_data: ReportCreate, created_by: str) -> Re
     if created_by == "system":
         _ensure_system_user(db)
 
+    # Create report instance
     db_report = Report(
         **report_data.model_dump(),
         created_by=created_by,
         status_changed_by=created_by,
         status_changed_at=datetime.utcnow()
     )
+    
+    # Generate embedding if there's text content
+    if db_report.title or db_report.description:
+        try:
+            from embedding_service import get_embedding_service
+            embed_svc = get_embedding_service()
+            text = f"{db_report.title}\n{db_report.description or ''}"
+            db_report.embedding = embed_svc.embed_text(text)
+            print(f"[INFO] Generated embedding for report '{db_report.title}'")
+        except Exception as e:
+            print(f"[WARNING] Failed to generate embedding for report: {e}")
+            # Continue without embedding rather than failing the report creation
+    
     db.add(db_report)
     db.commit()
     db.refresh(db_report)
@@ -282,6 +339,7 @@ def create_finding(
 ) -> Finding:
     """
     Create a new finding for a specific report with audit trail.
+    Automatically generates vector embedding for similarity search.
     
     Args:
         db: Database session
@@ -297,6 +355,19 @@ def create_finding(
         report_id=report_id,
         created_by=created_by
     )
+    
+    # Generate embedding for the finding
+    if db_finding.title or db_finding.description:
+        try:
+            from embedding_service import get_embedding_service
+            embed_svc = get_embedding_service()
+            text = f"{db_finding.title}\n{db_finding.description}\nCategory: {db_finding.category}\nSeverity: {db_finding.severity}"
+            db_finding.embedding = embed_svc.embed_text(text)
+            print(f"[INFO] Generated embedding for finding '{db_finding.title}'")
+        except Exception as e:
+            print(f"[WARNING] Failed to generate embedding for finding: {e}")
+            # Continue without embedding
+    
     db.add(db_finding)
     db.commit()
     db.refresh(db_finding)
@@ -579,3 +650,229 @@ def get_action_status_history(db: Session, action_id: uuid.UUID) -> List[ActionS
         List of ActionStatusHistory objects ordered by creation date
     """
     return db.query(ActionStatusHistory).filter(ActionStatusHistory.action_id == action_id).order_by(desc(ActionStatusHistory.created_at)).all()
+
+
+# ============================================================================
+# SIMILARITY SEARCH SERVICES
+# ============================================================================
+
+def search_similar_reports(
+    db: Session,
+    query_embedding: List[float],
+    limit: int = 5,
+    exclude_id: Optional[uuid.UUID] = None,
+    user_id: Optional[str] = None,
+    region: Optional[str] = None,
+    min_status: Optional[str] = None,
+    enforce_access: bool = True
+) -> List[tuple]:
+    """
+    Find reports similar to the given embedding vector with access control.
+    Uses vector distance for semantic similarity search.
+    
+    Args:
+        db: Database session
+        query_embedding: Vector embedding to search against (1536 dimensions)
+        limit: Maximum number of results to return
+        exclude_id: Optional report ID to exclude from results (e.g., the source report)
+        user_id: User ID for access control filtering
+        region: Optional region filter for compliance boundaries
+        min_status: Optional minimum status filter (e.g., only 'published' reports)
+        enforce_access: If True and user_id provided, enforce customer access control
+    
+    Returns:
+        List of tuples containing (Report, distance_score)
+        Lower distance = more similar
+    """
+    from sqlalchemy import bindparam, cast
+    from sqlalchemy.types import ARRAY, Float, UserDefinedType
+    from models_sync import UserAccess
+    
+    # Define VECTOR type for casting
+    class VECTOR(UserDefinedType):
+        cache_ok = True  # Safe to cache, dimensions are immutable
+        
+        def __init__(self, dim=1536):
+            self.dim = dim
+        
+        def get_col_spec(self, **kw):
+            return f"VECTOR({self.dim})"
+    
+    # Convert query_embedding to list if it's a numpy array
+    if hasattr(query_embedding, 'tolist'):
+        query_embedding = query_embedding.tolist()
+    
+    # Cast the bound parameter to VECTOR(1536) so CRDB recognizes it
+    qv = cast(bindparam("qv", value=query_embedding, type_=ARRAY(Float)), VECTOR(1536))
+    
+    # Use the <-> operator for cosine distance
+    distance = cast(Report.embedding.op("<->")(qv), Float).label('distance')
+    
+    # Build query with SQLAlchemy ORM
+    query = (
+        select(Report, distance)
+        .where(Report.embedding.isnot(None))
+    )
+    
+    # Apply access control if user_id is provided and enforcement is enabled
+    if user_id and enforce_access:
+        # Join with user_access to filter by accessible customers
+        authorized_customers_subquery = (
+            select(UserAccess.customer_id)
+            .where(UserAccess.user_id == user_id)
+            .subquery()
+        )
+        query = query.where(Report.customer_id.in_(select(authorized_customers_subquery)))
+    
+    # Apply other filters
+    if exclude_id:
+        query = query.where(Report.id != exclude_id)
+    
+    # Status filtering (only show published/reviewed reports by default)
+    if min_status:
+        query = query.where(Report.status == min_status)
+    else:
+        # Default: published and in_review
+        query = query.where(Report.status.in_(['published', 'in_review']))
+    
+    # Region filtering (for compliance)
+    if region:
+        query = query.where(Report.region == region)
+    
+    # Exclude PII-flagged reports by default (safety)
+    query = query.where(Report.pii_flag == False)
+    
+    # Order by distance (ascending: smaller = more similar) and limit
+    query = query.order_by(distance).limit(limit)
+    
+    # Execute query (embedding already in bindparam)
+    results = db.execute(query).all()
+    
+    return [(row.Report, row.distance) for row in results]
+
+
+def search_similar_findings(
+    db: Session,
+    query_embedding: List[float],
+    limit: int = 10,
+    exclude_id: Optional[uuid.UUID] = None,
+    categories: Optional[List[str]] = None,
+    min_severity: Optional[str] = None
+) -> List[tuple]:
+    """
+    Find findings similar to the given embedding vector.
+    
+    Args:
+        db: Database session
+        query_embedding: Vector embedding to search against
+        limit: Maximum number of results to return
+        exclude_id: Optional finding ID to exclude
+        categories: Optional list of categories to filter by
+        min_severity: Optional minimum severity level ('low', 'medium', 'high', 'critical')
+    
+    Returns:
+        List of tuples containing (Finding, distance_score)
+    """
+    from sqlalchemy import bindparam, cast
+    from sqlalchemy.types import ARRAY, Float, UserDefinedType
+    
+    # Define VECTOR type for casting
+    class VECTOR(UserDefinedType):
+        cache_ok = True  # Safe to cache, dimensions are immutable
+        
+        def __init__(self, dim=1536):
+            self.dim = dim
+        
+        def get_col_spec(self, **kw):
+            return f"VECTOR({self.dim})"
+    
+    # Convert query_embedding to list if it's a numpy array
+    if hasattr(query_embedding, 'tolist'):
+        query_embedding = query_embedding.tolist()
+    
+    severity_levels = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+    
+    # Cast to VECTOR(1536)
+    qv = cast(bindparam("qv", value=query_embedding, type_=ARRAY(Float)), VECTOR(1536))
+    distance = cast(Finding.embedding.op("<->")(qv), Float).label('distance')
+    
+    query = (
+        select(Finding, distance)
+        .where(Finding.embedding.isnot(None))
+    )
+    
+    if exclude_id:
+        query = query.where(Finding.id != exclude_id)
+    
+    # Filter out false positives
+    query = query.where(Finding.status != "false_positive")
+    
+    # Filter by categories if specified
+    if categories:
+        query = query.where(Finding.category.in_(categories))
+    
+    # Filter by severity if specified
+    if min_severity:
+        min_level = severity_levels.get(min_severity, 2)
+        valid_severities = [k for k, v in severity_levels.items() if v >= min_level]
+        query = query.where(Finding.severity.in_(valid_severities))
+    
+    query = query.order_by(distance).limit(limit)
+    
+    # Execute query (embedding already in bindparam)
+    results = db.execute(query).all()
+    return [(row.Finding, row.distance) for row in results]
+
+
+def generate_report_embedding(db: Session, report: Report) -> bool:
+    """
+    Generate and save embedding for a report.
+    
+    Args:
+        db: Database session
+        report: Report object to generate embedding for
+    
+    Returns:
+        True if embedding was generated successfully, False otherwise
+    """
+    try:
+        from embedding_service import get_embedding_service
+        
+        embed_svc = get_embedding_service()
+        embedding = embed_svc.embed_report(report)
+        
+        report.embedding = embedding
+        db.commit()
+        db.refresh(report)
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to generate embedding for report {report.id}: {e}")
+        db.rollback()
+        return False
+
+
+def generate_finding_embedding(db: Session, finding: Finding) -> bool:
+    """
+    Generate and save embedding for a finding.
+    
+    Args:
+        db: Database session
+        finding: Finding object to generate embedding for
+    
+    Returns:
+        True if embedding was generated successfully, False otherwise
+    """
+    try:
+        from embedding_service import get_embedding_service
+        
+        embed_svc = get_embedding_service()
+        embedding = embed_svc.embed_finding(finding)
+        
+        finding.embedding = embedding
+        db.commit()
+        db.refresh(finding)
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to generate embedding for finding {finding.id}: {e}")
+        db.rollback()
+        return False

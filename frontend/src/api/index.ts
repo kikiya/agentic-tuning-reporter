@@ -62,6 +62,8 @@ export const reportApi = {
     skip?: number;
     limit?: number;
     cluster_id?: string;
+    user_id?: string;
+    enforce_access?: boolean;
   }): Promise<AxiosResponse<Report[]>> => {
     return api.get('/reports', { params });
   },
@@ -84,6 +86,11 @@ export const reportApi = {
   // Delete a report
   deleteReport: async (reportId: string): Promise<AxiosResponse<void>> => {
     return api.delete(`/reports/${reportId}`);
+  },
+
+  // Get similar reports
+  getSimilarReports: async (reportId: string, limit?: number, user_id?: string): Promise<AxiosResponse<any>> => {
+    return api.get(`/reports/${reportId}/similar`, { params: { limit, user_id } });
   },
 
   // Get findings for a report

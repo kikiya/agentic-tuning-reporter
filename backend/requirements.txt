@@ -13,3 +13,6 @@ httpx==0.28.1
 psycopg[binary]==3.2.10
 fast-agent-mcp==0.2.58
 fastmcp==2.12.0
+# For vector embeddings and similarity search
+openai>=1.0.0
+pgvector==0.3.6

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useContext } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   AppBar,
@@ -25,14 +25,18 @@ import { useQuery } from '@tanstack/react-query';
 import { reportApi } from '../api';
 import { Report } from '../types';
 import ReportTypeModal from './ReportTypeModal';
+import { UserContext } from '../App';
 
 const Dashboard: React.FC = () => {
   const navigate = useNavigate();
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const { selectedUser } = useContext(UserContext);
 
   const { data: reports, isLoading, error, refetch } = useQuery({
-    queryKey: ['reports'],
-    queryFn: () => reportApi.getReports().then(res => res.data),
+    queryKey: ['reports', selectedUser],
+    queryFn: () => reportApi
+      .getReports({ user_id: selectedUser, enforce_access: true })
+      .then(res => res.data),
   });
 
   const handleCreateReport = () => {

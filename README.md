@@ -10,6 +10,7 @@ A full-stack application for generating and managing CockroachDB cluster tuning 
 - **🔍 Findings & Actions**: Track issues and recommendations
 - **💬 Collaboration**: Comment system for team discussions
 - **📝 Audit Trails**: Complete history of all changes
+- **🔎 Similarity Search**: Semantic search with co-located vectors and access control ([setup guide](SIMILARITY_SEARCH.md))
 
 ## 🏗️ Architecture
 
@@ -269,6 +270,34 @@ SESSION_COOKIE="your-session-cookie-here"
 # COCKROACH_KEY="/path/to/client.root.key"
 # COCKROACH_CA="/path/to/ca.crt"
 ```
+
+##### Generating a CockroachDB session cookie
+
+`SESSION_COOKIE` is obtained via the CockroachDB CLI. For local development with an insecure cluster, run:
+
+```bash
+cockroach auth-session login root --insecure
+```
+
+The command prints a table that includes both the session ID and the full authentication cookie, e.g.
+
+```
+username |     session ID      |                       authentication cookie
+---------+---------------------+---------------------------------------------------------------------
+root     | 1128458036895121409 | session=CIGAxoix08XUDxIQqYuzZCuow9flCtz6xVKKBA==; Path=/; HttpOnly
+```
+
+Copy the value after `session=` (stop before the semicolon) and paste it into each `SESSION_COOKIE` setting in your environment files.
+
+For secure clusters, omit `--insecure` and add the appropriate certificate flags, e.g.
+
+```bash
+cockroach auth-session login <sql-username> \
+  --certs-dir=/path/to/certs \
+  --host=your-cluster-hostname
+```
+
+The resulting cookie works for both the `/api/v2` Admin API endpoints and the `/_status` endpoints used by the metrics router.
 
 #### Backend - Agent Service (fastagent.secrets.yaml)
 ```yaml

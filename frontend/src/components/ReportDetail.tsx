@@ -10,6 +10,7 @@ import {
   Button,
   List,
   ListItem,
+  ListItemButton,
   ListItemText,
   Divider,
   AppBar,
@@ -35,10 +36,12 @@ import {
   BugReport as BugReportIcon,
   Build as BuildIcon,
   Comment as CommentIcon,
+  Search as SearchIcon,
 } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { reportApi } from '../api';
 import { Report, Finding, RecommendedAction, Comment, ReportStatusHistory, CreateActionRequest, UpdateActionRequest, UpdateFindingRequest } from '../types';
+import { UserContext } from '../App';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -78,6 +81,21 @@ const ReportDetail: React.FC = () => {
     severity: 'medium',
     tags: '' as string,
   });
+
+  // State for similar reports dialog
+  const [similarReportsOpen, setSimilarReportsOpen] = React.useState(false);
+  
+  // Get current user from context
+  const { selectedUser } = React.useContext(UserContext);
+
+  // Redirect to dashboard if user switches while viewing a report
+  const previousUserRef = React.useRef(selectedUser);
+  React.useEffect(() => {
+    if (previousUserRef.current && previousUserRef.current !== selectedUser) {
+      navigate('/');
+    }
+    previousUserRef.current = selectedUser;
+  }, [selectedUser, navigate]);
 
   const updateFindingMutation = useMutation({
     mutationFn: async () => {
@@ -169,6 +187,16 @@ const ReportDetail: React.FC = () => {
     enabled: !!reportId,
   });
 
+  // Query for similar reports (only fetch when dialog is open)
+  const { data: similarReports, isLoading: similarReportsLoading } = useQuery({
+    queryKey: ['similarReports', reportId, selectedUser],
+    queryFn: () => {
+      if (!reportId) return null;
+      return reportApi.getSimilarReports(reportId, 5, selectedUser).then(res => res.data);
+    },
+    enabled: !!reportId && similarReportsOpen,
+  });
+
   // Mutations
   const createFindingMutation = useMutation({
     mutationFn: async () => {
@@ -189,6 +217,18 @@ const ReportDetail: React.FC = () => {
       queryClient.invalidateQueries({ queryKey: ['report', reportId] });
       setFindingOpen(false);
       setNewFinding({ title: '', description: '', category: 'performance', severity: 'medium', tags: '' });
+    },
+  });
+
+  const publishReportMutation = useMutation({
+    mutationFn: async () => {
+      if (!reportId) return;
+      return reportApi.updateReport(reportId, { status: 'published' }).then((res) => res.data);
+    },
+    onSuccess: (updatedReport) => {
+      if (!reportId) return;
+      queryClient.setQueryData(['report', reportId], updatedReport);
+      queryClient.invalidateQueries({ queryKey: ['reports'] });
     },
   });
 
@@ -307,42 +347,48 @@ const ReportDetail: React.FC = () => {
 
   return (
     <>
-      <AppBar position="static">
-        <Toolbar>
-          <IconButton
-            edge="start"
-            color="inherit"
-            onClick={() => navigate('/')}
-            sx={{ mr: 2 }}
-          >
-            <ArrowBackIcon />
-          </IconButton>
-          <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-            {report.title}
-          </Typography>
-          <Button
-            color="inherit"
-            onClick={() => navigate(`/reports/${reportId}/edit`)}
-            startIcon={<EditIcon />}
-          >
-            Edit
-          </Button>
-        </Toolbar>
-      </AppBar>
-
-      <Container maxWidth="lg" sx={{ mt: 2 }}>
+      <Container maxWidth="lg" sx={{ mt: 4 }}>
         {/* Report Header */}
         <Card sx={{ mb: 3 }}>
           <CardContent>
             <Box display="flex" justifyContent="space-between" alignItems="flex-start" mb={2}>
-              <Typography variant="h4" component="h1">
+              <Typography variant="h4" component="h1" sx={{ flexGrow: 1 }}>
                 {report.title}
               </Typography>
-              <Chip
-                label={report.status}
-                color={getStatusColor(report.status) as any}
-                size="medium"
-              />
+              <Box display="flex" gap={1} alignItems="center">
+                <Chip
+                  label={report.status}
+                  color={getStatusColor(report.status) as any}
+                  size="medium"
+                />
+                {report.status !== 'published' && (
+                  <Button
+                    variant="contained"
+                    color="success"
+                    size="small"
+                    onClick={() => publishReportMutation.mutate()}
+                    disabled={publishReportMutation.isPending}
+                  >
+                    {publishReportMutation.isPending ? 'Publishing…' : 'Publish'}
+                  </Button>
+                )}
+                <Button
+                  variant="outlined"
+                  onClick={() => setSimilarReportsOpen(true)}
+                  startIcon={<SearchIcon />}
+                  size="small"
+                >
+                  Find Similar
+                </Button>
+                <Button
+                  variant="contained"
+                  onClick={() => navigate(`/reports/${reportId}/edit`)}
+                  startIcon={<EditIcon />}
+                  size="small"
+                >
+                  Edit
+                </Button>
+              </Box>
             </Box>
 
             <Typography variant="body1" paragraph>
@@ -420,43 +466,43 @@ const ReportDetail: React.FC = () => {
                               size="small"
                             />
                           </Box>
-                        <Box mt={1} display="flex" justifyContent="flex-end" gap={1}>
-                          <Button
-                            size="small"
-                            variant="text"
-                            startIcon={<EditIcon />}
-                            onClick={() => {
-                              if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) {
-                                document.activeElement.blur();
-                              }
-                              setEditingFindingId(finding.id);
-                              setEditFinding({
-                                title: finding.title,
-                                description: finding.description,
-                                category: finding.category as string,
-                                severity: finding.severity as string,
-                                tags: (finding.tags || []).join(','),
-                              });
-                              setEditFindingOpen(true);
-                            }}
-                          >
-                            Edit Finding
-                          </Button>
-                          <Button
-                            size="small"
-                            variant="outlined"
-                            startIcon={<BuildIcon />}
-                            onClick={() => {
-                              if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) {
-                                document.activeElement.blur();
-                              }
-                              setActionFindingId(finding.id);
-                              setActionOpen(true);
-                            }}
-                          >
-                            Add Action
-                          </Button>
-                        </Box>
+                          <Box mt={1} display="flex" justifyContent="flex-end" gap={1}>
+                            <Button
+                              size="small"
+                              variant="text"
+                              startIcon={<EditIcon />}
+                              onClick={() => {
+                                if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) {
+                                  document.activeElement.blur();
+                                }
+                                setEditingFindingId(finding.id);
+                                setEditFinding({
+                                  title: finding.title,
+                                  description: finding.description,
+                                  category: finding.category as string,
+                                  severity: finding.severity as string,
+                                  tags: (finding.tags || []).join(','),
+                                });
+                                setEditFindingOpen(true);
+                              }}
+                            >
+                              Edit Finding
+                            </Button>
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              startIcon={<BuildIcon />}
+                              onClick={() => {
+                                if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) {
+                                  document.activeElement.blur();
+                                }
+                                setActionFindingId(finding.id);
+                                setActionOpen(true);
+                              }}
+                            >
+                              Add Action
+                            </Button>
+                          </Box>
                         </Box>
 
                         <Typography variant="body1" paragraph>
@@ -978,6 +1024,85 @@ const ReportDetail: React.FC = () => {
           >
             Add Action
           </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Similar Reports Dialog */}
+      <Dialog
+        open={similarReportsOpen}
+        onClose={() => setSimilarReportsOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>Similar Reports</DialogTitle>
+        <DialogContent>
+          {similarReportsLoading ? (
+            <Box display="flex" justifyContent="center" alignItems="center" p={3}>
+              <Typography>Loading similar reports...</Typography>
+            </Box>
+          ) : similarReports?.similar_reports?.length > 0 ? (
+            <>
+              <Alert severity="info" sx={{ mb: 2 }}>
+                Viewing as <strong>{selectedUser}</strong> • 
+                Showing {similarReports.count} result{similarReports.count !== 1 ? 's' : ''}
+              </Alert>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Similar to "{similarReports.source_report_title}"
+              </Typography>
+              <List>
+                {similarReports.similar_reports.map((similar: any) => (
+                  <ListItem
+                    key={similar.id}
+                    disablePadding
+                    sx={{ mb: 1 }}
+                  >
+                    <ListItemButton
+                      onClick={() => {
+                        setSimilarReportsOpen(false);
+                        navigate(`/reports/${similar.id}`);
+                      }}
+                      sx={{
+                        border: 1,
+                        borderColor: 'divider',
+                        borderRadius: 1,
+                      }}
+                    >
+                      <ListItemText
+                        primary={
+                          <Box display="flex" justifyContent="space-between" alignItems="center">
+                            <Typography variant="subtitle1">{similar.title}</Typography>
+                            <Chip
+                              label={`${(similar.similarity_score * 100).toFixed(0)}% match`}
+                              size="small"
+                              color={similar.similarity_score > 0.7 ? 'success' : 'default'}
+                            />
+                          </Box>
+                        }
+                        secondary={
+                          <>
+                            Cluster: {similar.cluster_id} • Status: {similar.status} • Created: {new Date(similar.created_at).toLocaleDateString()}
+                          </>
+                        }
+                      />
+                    </ListItemButton>
+                  </ListItem>
+                ))}
+              </List>
+            </>
+          ) : (
+            <Box p={3} textAlign="center">
+              <Alert severity="warning" sx={{ mb: 2 }}>
+                Viewing as <strong>{selectedUser}</strong> • No similar reports found
+              </Alert>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                • No similar reports exist for customers you have access to<br/>
+                • Try switching users in the top navigation
+              </Typography>
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSimilarReportsOpen(false)}>Close</Button>
         </DialogActions>
       </Dialog>
     </>

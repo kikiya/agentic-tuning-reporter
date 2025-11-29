@@ -14,11 +14,12 @@ from schemas import (
     CommentResponse, CommentCreate, ReportStatusHistoryResponse,
 )
 from services_sync import (
-    get_reports, get_reports_by_cluster, get_report_by_id, create_report, update_report, delete_report,
+    get_reports, get_reports_for_user, get_reports_by_cluster, get_report_by_id, create_report, update_report, delete_report,
     get_findings_by_report, create_finding, update_finding, delete_finding,
     get_actions_by_finding, create_action, update_action,
     get_comments_by_report, create_comment,
-    get_report_status_history
+    get_report_status_history,
+    search_similar_reports
 )
 
 router = APIRouter()
@@ -29,15 +30,19 @@ def list_reports(
     skip: int = 0,
     limit: int = 100,
     cluster_id: str = None,
+    user_id: str | None = None,
+    enforce_access: bool = True,
     db: Session = Depends(get_db)
 ):
-    """Get all reports with optional filtering"""
+    """Get reports with optional filtering and access control"""
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
-        
+
     if cluster_id:
         reports = get_reports_by_cluster(db, cluster_id)
         return reports[skip:skip + limit]
+    if user_id and enforce_access:
+        return get_reports_for_user(db, user_id, skip=skip, limit=limit)
     return get_reports(db, skip=skip, limit=limit)
 
 @router.get("/reports/{report_id}", response_model=ReportDetail)
@@ -224,3 +229,93 @@ def create_comment_for_report(
         
     comment = create_comment(db, comment_data, report_id, current_user)
     return CommentResponse.model_validate(comment)
+
+# Similarity search endpoints
+@router.get("/reports/{report_id}/similar")
+def find_similar_reports(
+    report_id: UUID,
+    limit: int = 5,
+    user_id: str = "analyst_alice",  # Default for demo - in production, get from auth token
+    enforce_access: bool = True,
+    db: Session = Depends(get_db)
+):
+    """
+    Find reports similar to the specified report using vector similarity search.
+    Returns reports with similar content, problems, and characteristics.
+    
+    Access control:
+    - If enforce_access=True, only returns reports the user has access to via customer mappings
+    - If enforce_access=False, returns all matching reports (admin mode)
+    
+    Demo users:
+    - analyst_alice: Can see Acme Corp reports only
+    - analyst_bob: Can see Globex Industries reports only  
+    - admin_charlie: Can see all reports
+    """
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    print(f"[SIMILARITY SEARCH] Request from user_id={user_id} for report_id={report_id}, limit={limit}, enforce_access={enforce_access}")
+    
+    # Get the source report
+    report = get_report_by_id(db, report_id)
+    if not report:
+        print(f"[SIMILARITY SEARCH ERROR] Report {report_id} not found")
+        raise HTTPException(status_code=404, detail="Report not found")
+    
+    print(f"[SIMILARITY SEARCH] Found report: '{report.title}', has_embedding={report.embedding is not None}")
+    
+    if report.embedding is None:
+        print(f"[SIMILARITY SEARCH ERROR] Report {report_id} has no embedding - needs regeneration")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Report '{report.title}' doesn't have an embedding yet. Create a new report or edit this one to generate embeddings."
+        )
+    
+    # Search for similar reports with access control
+    try:
+        similar_reports = search_similar_reports(
+            db=db,
+            query_embedding=report.embedding,
+            limit=limit,
+            exclude_id=report_id,
+            user_id=user_id,
+            enforce_access=enforce_access
+        )
+        
+        # Format response
+        results = []
+        for similar_report, distance in similar_reports:
+            # Convert distance to similarity score (0-1, where 1 is most similar)
+            # Lower distance = more similar, so we invert it
+            similarity_score = max(0.0, 1.0 - (distance / 2.0))  # Normalize distance
+            
+            results.append({
+                "id": str(similar_report.id),
+                "title": similar_report.title,
+                "cluster_id": similar_report.cluster_id,
+                "status": similar_report.status,
+                "created_at": similar_report.created_at.isoformat() if similar_report.created_at else None,
+                "created_by": similar_report.created_by,
+                "similarity_score": round(similarity_score, 4),
+                "distance": round(distance, 4)
+            })
+        
+        print(f"[SIMILARITY SEARCH SUCCESS] Found {len(results)} similar reports for user {user_id}")
+        
+        return {
+            "source_report_id": str(report_id),
+            "source_report_title": report.title,
+            "count": len(results),
+            "viewing_as": user_id,
+            "access_control_enabled": enforce_access,
+            "similar_reports": results
+        }
+    except Exception as e:
+        print(f"[SIMILARITY SEARCH ERROR] Search failed: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Similarity search failed: {str(e)}"
+        )

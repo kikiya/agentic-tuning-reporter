@@ -1,11 +1,12 @@
 """
 SQLAlchemy models for the CRDB tuning report generator (synchronous version)
 """
-from sqlalchemy import Column, String, Text, DateTime, Integer, ForeignKey, CheckConstraint
+from sqlalchemy import Column, String, Text, DateTime, Integer, ForeignKey, CheckConstraint, Boolean
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from database_sync import Base
+from pgvector.sqlalchemy import Vector
 from typing import List, Optional
 import uuid
 
@@ -49,6 +50,15 @@ class Report(Base):
     status_changed_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    
+    # Vector embedding for similarity search
+    embedding = Column(Vector(1536))
+    
+    # Optional metadata for future guardrails
+    customer_id = Column(UUID(as_uuid=True))
+    region = Column(String)
+    pii_flag = Column(Boolean, default=False)
+    crdb_version = Column(String)
 
     # Relationships
     creator = relationship("User", back_populates="created_reports", foreign_keys=[created_by])
@@ -76,6 +86,10 @@ class Finding(Base):
     created_by = Column(String, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    
+    # Vector embedding for similarity search
+    embedding = Column(Vector(1536))
+    customer_id = Column(UUID(as_uuid=True))
 
     # Relationships
     report = relationship("Report", back_populates="findings")
@@ -183,3 +197,61 @@ class ActionStatusHistory(Base):
     # Relationships
     action = relationship("RecommendedAction", back_populates="status_history")
     changer = relationship("User", foreign_keys=[changed_by])
+
+
+# ============================================================================
+# SIMILARITY SEARCH & ACCESS CONTROL MODELS
+# ============================================================================
+
+class Customer(Base):
+    """Customer/organization entity for multi-tenant access control"""
+    __tablename__ = "customers"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    name = Column(String, nullable=False)
+    region = Column(String)  # 'US', 'EU', 'APAC', 'GLOBAL'
+    pii_allowed = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    user_access = relationship("UserAccess", back_populates="customer", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        CheckConstraint(region.in_(["US", "EU", "APAC", "GLOBAL"]), name="check_region"),
+    )
+
+
+class UserAccess(Base):
+    """User access control for customer data"""
+    __tablename__ = "user_access"
+
+    user_id = Column(String, ForeignKey("users.id"), primary_key=True)
+    customer_id = Column(UUID(as_uuid=True), ForeignKey("customers.id"), primary_key=True)
+    access_level = Column(String, server_default="read")
+    granted_at = Column(DateTime(timezone=True), server_default=func.now())
+    granted_by = Column(String, ForeignKey("users.id"))
+
+    # Relationships
+    user = relationship("User", foreign_keys=[user_id])
+    customer = relationship("Customer", back_populates="user_access")
+    granter = relationship("User", foreign_keys=[granted_by])
+
+    __table_args__ = (
+        CheckConstraint(access_level.in_(["read", "write", "admin"]), name="check_access_level"),
+    )
+
+
+class ContentFlag(Base):
+    """Content flags for fine-grained report controls"""
+    __tablename__ = "content_flags"
+
+    report_id = Column(UUID(as_uuid=True), ForeignKey("reports.id", ondelete="CASCADE"), primary_key=True)
+    flag = Column(String, primary_key=True)  # 'pii', 'restricted', 'needs_review'
+    added_by = Column(String, ForeignKey("users.id"))
+    added_at = Column(DateTime(timezone=True), server_default=func.now())
+    notes = Column(Text)
+
+    # Relationships
+    report = relationship("Report")
+    adder = relationship("User", foreign_keys=[added_by])
